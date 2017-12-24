@@ -1,0 +1,16 @@
+= Semicircle
+
+image::semicircle-logo.svg[opts=inline]
+So, you work at an ISP and you need a RADIUS server for your billing. If you want
+
+- to have predictable performance and memory usage
+- no crashes in the middle of the day, and
+- no cramming in your vendor logic into existing solutions
+
+..then why not code your own?
+Semicircle gives you the right tools to do just that.
+
+---
+Built with nightly link:https://rust-lang.org[Rust] and on top of link:https://tokio.rs[Tokio].
+
+See the simple example in `src/main.rs`.
