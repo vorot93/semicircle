@@ -18,15 +18,17 @@ fn server_handler(
     // We will just sleep here for now. All external I/O and decision making code is up to you.
     await!(Timer::default().sleep(Duration::from_millis(1000))).unwrap();
 
-    let response = vec![semicircle::RadiusMessage {
-        addr: pkt.addr,
-        data: semicircle::pkt::RadiusData {
-            code: rp::RadiusCode::AccessAccept,
-            identifier: pkt.data.identifier,
-            authenticator: pkt.data.authenticator,
-            attributes: vec![],
+    let response = vec![
+        semicircle::RadiusMessage {
+            addr: pkt.addr,
+            data: semicircle::pkt::RadiusData {
+                code: rp::RadiusCode::AccessAccept,
+                identifier: pkt.data.identifier,
+                authenticator: pkt.data.authenticator,
+                attributes: vec![],
+            },
         },
-    }];
+    ];
 
     // And here we just return packets that will be sent in return
     Ok(response)

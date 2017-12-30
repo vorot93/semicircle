@@ -25,7 +25,7 @@ use self::std::convert::TryFrom;
 use tokio_core::net::{UdpCodec, UdpSocket};
 use tokio_core::reactor::Core;
 use futures::prelude::*;
-use futures::future::{ok};
+use futures::future::ok;
 
 #[derive(Clone, Debug, PartialEq)]
 enum ServerStatus {
@@ -104,11 +104,9 @@ impl Server {
             let handler_result = await!((handler.read().unwrap())(pkt));
 
             match handler_result {
-                Ok(replies) => {
-                    for reply in replies {
-                        output.start_send(reply)?;
-                    }
-                }
+                Ok(replies) => for reply in replies {
+                    output.start_send(reply)?;
+                },
                 Err(e) => {
                     println!("{}", e);
                 }
