@@ -3,9 +3,12 @@
 extern crate futures_await as futures;
 extern crate radius_parser as rp;
 extern crate semicircle;
+extern crate tokio_core;
 extern crate tokio_timer;
 
 use futures::prelude::*;
+use tokio_core::net::UdpSocket;
+use tokio_core::reactor::Core;
 use tokio_timer::Timer;
 use std::time::Duration;
 
@@ -35,11 +38,14 @@ fn server_handler(
 }
 
 fn main() {
-    let mut srv = semicircle::Server::new("127.0.0.1:1812".parse().unwrap()).unwrap();
+    let mut core = Core::new().unwrap();
+    let socket = UdpSocket::bind(&"127.0.0.1:1812".parse().unwrap(), &core.handle())
+        .expect("Failed to bind to a socket");
 
-    println!("Setting handler");
-    srv.set_handler(server_handler);
+    let srv = semicircle::ServerBuilder::new()
+        .with_handler(server_handler)
+        .with_socket(socket)
+        .build();
 
-    println!("Starting server");
-    srv.serve().unwrap();
+    core.run(srv).unwrap();
 }

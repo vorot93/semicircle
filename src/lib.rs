@@ -4,6 +4,7 @@
 #![feature(proc_macro, conservative_impl_trait, generators)]
 
 extern crate bytes;
+extern crate cancellation;
 #[macro_use]
 extern crate error_chain;
 extern crate futures_await as futures;
@@ -18,21 +19,14 @@ pub mod errors;
 pub mod pkt;
 pub mod util;
 
-use std::sync::{Arc, Mutex, RwLock};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, RwLock};
 use std::io;
 use std::net::SocketAddr;
-use self::std::convert::TryFrom;
-use tokio_core::net::{UdpCodec, UdpSocket};
-use tokio_core::reactor::Core;
+use std::convert::TryFrom;
+use cancellation::{CancellationToken, CancellationTokenSource};
+use tokio_core::net::{UdpCodec, UdpFramed, UdpSocket};
 use futures::prelude::*;
 use futures::future::ok;
-
-#[derive(Clone, Debug, PartialEq)]
-enum ServerStatus {
-    Stopped,
-    Running,
-}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct RadiusMessage {
@@ -64,40 +58,38 @@ impl UdpCodec for RadiusCodec {
     }
 }
 
-pub struct RequestContext {
-    pub incoming: RadiusMessage,
-    pub outgoing: Vec<RadiusMessage>,
+pub trait RadiusIO {
+    fn framed(self, codec: RadiusCodec) -> UdpFramed<RadiusCodec>;
+}
+
+impl RadiusIO for UdpSocket {
+    fn framed(self, codec: RadiusCodec) -> UdpFramed<RadiusCodec> {
+        self.framed(codec)
+    }
 }
 
 pub type RadiusHandlerResult = Box<Future<Item = Vec<RadiusMessage>, Error = io::Error>>;
 
-pub struct Server {
-    core: Arc<Mutex<Core>>,
-    addr: SocketAddr,
-    time_to_stop: Arc<AtomicBool>,
-    status: ServerStatus,
+pub struct ServerBuilder {
+    cancellation_token: Arc<CancellationToken>,
     handler: Arc<RwLock<Fn(RadiusMessage) -> RadiusHandlerResult>>,
 }
 
-impl Server {
-    pub fn new(addr: std::net::SocketAddr) -> errors::Result<Self> {
-        Ok(Self {
-            core: Arc::new(Mutex::new(Core::new()?)),
-            status: ServerStatus::Stopped,
-            addr: addr,
-
-            time_to_stop: Default::default(),
+impl ServerBuilder {
+    pub fn new() -> Self {
+        Self {
+            cancellation_token: CancellationTokenSource::new().token().clone(),
             handler: Arc::new(RwLock::new(|_| {
                 RadiusHandlerResult::from(Box::new(ok(vec![])))
             })),
-        })
+        }
     }
 
     #[async]
     fn main_handler(
         framed: tokio_core::net::UdpFramed<RadiusCodec>,
         handler: Arc<RwLock<Fn(RadiusMessage) -> RadiusHandlerResult>>,
-        must_stop: Arc<AtomicBool>,
+        cancellation_token: Arc<CancellationToken>,
     ) -> std::io::Result<()> {
         let (mut output, input) = framed.split();
         #[async]
@@ -113,7 +105,7 @@ impl Server {
                 }
             }
 
-            if must_stop.load(Ordering::Relaxed) {
+            if let Err(_) = cancellation_token.result() {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::Other,
                     "Time to stop",
@@ -124,31 +116,41 @@ impl Server {
         Ok(())
     }
 
-    pub fn set_handler<F>(&mut self, f: F)
+    pub fn with_handler<F>(mut self, f: F) -> Self
     where
         F: Fn(RadiusMessage) -> RadiusHandlerResult + Send + Sync + 'static,
     {
         self.handler = Arc::new(RwLock::new(f));
+        self
     }
 
-    /// Starts the server and blocks the thread
-    pub fn serve(&mut self) -> errors::Result<()> {
-        if self.status == ServerStatus::Stopped {
-            let handle = self.core.lock().unwrap().handle();
-            let socket = UdpSocket::bind(&self.addr, &handle)?;
+    pub fn with_cancellation(mut self, token: Arc<CancellationToken>) -> Self {
+        self.cancellation_token = token;
+        self
+    }
 
-            let framed = socket.framed(RadiusCodec);
-
-            self.status = ServerStatus::Running;
-
-            let core = self.core.clone();
-            let handler = self.handler.clone();
-            let time_to_stop = self.time_to_stop.clone();
-            core.lock()
-                .unwrap()
-                .run(Self::main_handler(framed, handler, time_to_stop))
-                .unwrap();
+    pub fn with_socket<T: RadiusIO>(self, socket: T) -> Server<T> {
+        Server {
+            inner: self,
+            socket,
         }
-        Ok(())
+    }
+}
+
+pub struct Server<T: RadiusIO> {
+    inner: ServerBuilder,
+    socket: T,
+}
+
+impl<T: RadiusIO + 'static> Server<T> {
+    #[async]
+    pub fn build(self) -> io::Result<()> {
+        let framed = self.socket.framed(RadiusCodec);
+
+        await!(ServerBuilder::main_handler(
+            framed,
+            self.inner.handler,
+            self.inner.cancellation_token
+        ))
     }
 }

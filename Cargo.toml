@@ -18,6 +18,7 @@ path = "src/main.rs"
 
 [dependencies]
 byteorder = "*"
+cancellation = "*"
 error-chain = "*"
 radius-parser = { git = "https://github.com/vorot93/radius-parser" }
 bytes = "*"
