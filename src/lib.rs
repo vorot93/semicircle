@@ -16,6 +16,7 @@ extern crate tokio_service;
 
 pub mod errors;
 pub mod pkt;
+pub mod util;
 
 use std::sync::{Arc, Mutex, RwLock};
 use std::sync::atomic::{AtomicBool, Ordering};
