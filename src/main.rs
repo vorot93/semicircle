@@ -10,16 +10,18 @@ use tokio_core::net::UdpSocket;
 use tokio_core::reactor::Core;
 use tokio_timer::Timer;
 use std::io;
+use std::sync::Arc;
 use std::time::Duration;
 
 fn server_handler(
+    timer: &Timer,
     pkt: semicircle::RadiusMessage,
 ) -> Box<Future<Item = Vec<semicircle::RadiusMessage>, Error = io::Error> + Send> {
     println!("Received message from {}:\n{:?}", pkt.addr, pkt.data);
 
     // We will just sleep here for now. All external I/O and decision making code is up to you.
     Box::new(
-        Timer::default()
+        timer
             .sleep(Duration::from_millis(1000))
             .map(move |_| pkt)
             .map_err(|e| {
@@ -52,9 +54,15 @@ fn main() {
     let socket = UdpSocket::bind(&"127.0.0.1:1812".parse().unwrap(), &core.handle())
         .expect("Failed to bind to a socket");
 
+    let timer = Arc::new(Timer::default());
+    let handler = {
+        let timer = Arc::clone(&timer);
+        move |pkt| server_handler(&*timer, pkt)
+    };
+
     let srv = semicircle::ServerBuilder::new()
         .with_cpu_pool(futures_cpupool::Builder::new().pool_size(8))
-        .with_handler(server_handler)
+        .with_handler(handler)
         .acquire_socket(socket)
         .build();
 
