@@ -1,13 +1,14 @@
 #![feature(try_from)]
 #![feature(try_trait)]
 #![feature(trait_alias)]
-#![feature(proc_macro, conservative_impl_trait, generators)]
+#![feature(conservative_impl_trait)]
 
 extern crate bytes;
 extern crate cancellation;
 #[macro_use]
 extern crate error_chain;
-extern crate futures_await as futures;
+extern crate futures;
+extern crate futures_cpupool;
 extern crate nom;
 extern crate radius_parser;
 extern crate tokio_core;
@@ -19,7 +20,7 @@ pub mod errors;
 pub mod pkt;
 pub mod util;
 
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex};
 use std::io;
 use std::net::SocketAddr;
 use std::convert::TryFrom;
@@ -27,6 +28,7 @@ use cancellation::{CancellationToken, CancellationTokenSource};
 use tokio_core::net::{UdpCodec, UdpFramed, UdpSocket};
 use futures::prelude::*;
 use futures::future::ok;
+use futures_cpupool::CpuPool;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct RadiusMessage {
@@ -68,59 +70,86 @@ impl RadiusIO for UdpSocket {
     }
 }
 
-pub type RadiusHandlerResult = Box<Future<Item = Vec<RadiusMessage>, Error = io::Error>>;
+pub type RadiusHandlerResult = Box<Future<Item = Vec<RadiusMessage>, Error = io::Error> + Send>;
 
 pub struct ServerBuilder {
+    cpu_pool: CpuPool,
     cancellation_token: Arc<CancellationToken>,
-    handler: Arc<RwLock<Fn(RadiusMessage) -> RadiusHandlerResult>>,
+    handler: Box<Fn(RadiusMessage) -> RadiusHandlerResult + Send + Sync + 'static>,
+}
+
+struct HandleState {
+    pub cancellation_token: Arc<CancellationToken>,
+    pub output: Arc<Mutex<Sink<SinkItem = RadiusMessage, SinkError = io::Error> + Send>>,
 }
 
 impl ServerBuilder {
     pub fn new() -> Self {
         Self {
+            cpu_pool: CpuPool::new(1),
             cancellation_token: CancellationTokenSource::new().token().clone(),
-            handler: Arc::new(RwLock::new(|_| {
-                RadiusHandlerResult::from(Box::new(ok(vec![])))
-            })),
+            handler: Box::new(|_| RadiusHandlerResult::from(Box::new(ok(vec![])))),
         }
     }
 
-    #[async]
     fn main_handler(
+        cpu_pool: CpuPool,
         framed: tokio_core::net::UdpFramed<RadiusCodec>,
-        handler: Arc<RwLock<Fn(RadiusMessage) -> RadiusHandlerResult>>,
+        handler: Box<Fn(RadiusMessage) -> RadiusHandlerResult + Send + Sync + 'static>,
         cancellation_token: Arc<CancellationToken>,
-    ) -> std::io::Result<()> {
-        let (mut output, input) = framed.split();
-        #[async]
-        for pkt in input {
-            let handler_result = await!((handler.read().unwrap())(pkt));
+    ) -> impl Future<Item = (), Error = io::Error> {
+        let (output, input) = framed.split();
 
-            match handler_result {
-                Ok(replies) => for reply in replies {
-                    output.start_send(reply)?;
-                },
-                Err(e) => {
-                    println!("{}", e);
+        let output_ref = Arc::new(Mutex::new(output));
+
+        input
+            .map(move |v| {
+                (
+                    HandleState {
+                        cancellation_token: cancellation_token.clone(),
+                        output: output_ref.clone(),
+                    },
+                    v,
+                )
+            })
+            .and_then({
+                let pool = cpu_pool.clone();
+                move |(state, pkt)| {
+                    pool.spawn(
+                        handler(pkt)
+                            .or_else(|e| {
+                                println!("{}", e);
+                                Ok(vec![])
+                            })
+                            .map(move |replies| (state, replies)),
+                    ).and_then(|(state, replies)| {
+                            for reply in replies {
+                                state.output.lock().unwrap().start_send(reply)?;
+                            }
+                            Ok(state)
+                        })
+                        .and_then(|state| {
+                            state
+                                .cancellation_token
+                                .result()
+                                .map(move |_| state)
+                                .map_err(|_| io::Error::new(io::ErrorKind::Other, "Time to stop"))
+                        })
                 }
-            }
-
-            if let Err(_) = cancellation_token.result() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "Time to stop",
-                ));
-            }
-        }
-
-        Ok(())
+            })
+            .for_each(|_| Ok(()))
     }
 
     pub fn with_handler<F>(mut self, f: F) -> Self
     where
         F: Fn(RadiusMessage) -> RadiusHandlerResult + Send + Sync + 'static,
     {
-        self.handler = Arc::new(RwLock::new(f));
+        self.handler = Box::new(f);
+        self
+    }
+
+    pub fn with_cpu_pool(mut self, builder: &mut futures_cpupool::Builder) -> Self {
+        self.cpu_pool = builder.create();
         self
     }
 
@@ -129,7 +158,7 @@ impl ServerBuilder {
         self
     }
 
-    pub fn with_socket<T: RadiusIO>(self, socket: T) -> Server<T> {
+    pub fn acquire_socket<T: RadiusIO>(self, socket: T) -> Server<T> {
         Server {
             inner: self,
             socket,
@@ -143,14 +172,18 @@ pub struct Server<T: RadiusIO> {
 }
 
 impl<T: RadiusIO + 'static> Server<T> {
-    #[async]
-    pub fn build(self) -> io::Result<()> {
+    pub fn release_socket(self) -> ServerBuilder {
+        self.inner
+    }
+
+    pub fn build(self) -> impl Future<Item = (), Error = io::Error> {
         let framed = self.socket.framed(RadiusCodec);
 
-        await!(ServerBuilder::main_handler(
+        ServerBuilder::main_handler(
+            self.inner.cpu_pool,
             framed,
             self.inner.handler,
-            self.inner.cancellation_token
-        ))
+            self.inner.cancellation_token,
+        )
     }
 }

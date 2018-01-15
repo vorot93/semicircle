@@ -1,6 +1,5 @@
-#![feature(proc_macro, conservative_impl_trait, generators)]
-
-extern crate futures_await as futures;
+extern crate futures;
+extern crate futures_cpupool;
 extern crate radius_parser as rp;
 extern crate semicircle;
 extern crate tokio_core;
@@ -10,31 +9,42 @@ use futures::prelude::*;
 use tokio_core::net::UdpSocket;
 use tokio_core::reactor::Core;
 use tokio_timer::Timer;
+use std::io;
 use std::time::Duration;
 
-#[async(boxed)]
 fn server_handler(
     pkt: semicircle::RadiusMessage,
-) -> std::io::Result<Vec<semicircle::RadiusMessage>> {
+) -> Box<Future<Item = Vec<semicircle::RadiusMessage>, Error = io::Error> + Send> {
     println!("Received message from {}:\n{:?}", pkt.addr, pkt.data);
 
     // We will just sleep here for now. All external I/O and decision making code is up to you.
-    await!(Timer::default().sleep(Duration::from_millis(1000))).unwrap();
+    Box::new(
+        Timer::default()
+            .sleep(Duration::from_millis(1000))
+            .map(move |_| pkt)
+            .map_err(|e| {
+                panic!(e);
+            })
+            .inspect(|_| {
+                println!("Slept and now forming response");
+            })
+            .and_then(|pkt| {
+                let response = vec![
+                    semicircle::RadiusMessage {
+                        addr: pkt.addr,
+                        data: semicircle::pkt::RadiusData {
+                            code: rp::RadiusCode::AccessAccept,
+                            identifier: pkt.data.identifier,
+                            authenticator: pkt.data.authenticator,
+                            attributes: vec![],
+                        },
+                    },
+                ];
 
-    let response = vec![
-        semicircle::RadiusMessage {
-            addr: pkt.addr,
-            data: semicircle::pkt::RadiusData {
-                code: rp::RadiusCode::AccessAccept,
-                identifier: pkt.data.identifier,
-                authenticator: pkt.data.authenticator,
-                attributes: vec![],
-            },
-        },
-    ];
-
-    // And here we just return packets that will be sent in return
-    Ok(response)
+                // And here we just return packets that will be sent in return
+                Ok(response)
+            }),
+    )
 }
 
 fn main() {
@@ -43,8 +53,9 @@ fn main() {
         .expect("Failed to bind to a socket");
 
     let srv = semicircle::ServerBuilder::new()
+        .with_cpu_pool(futures_cpupool::Builder::new().pool_size(8))
         .with_handler(server_handler)
-        .with_socket(socket)
+        .acquire_socket(socket)
         .build();
 
     core.run(srv).unwrap();

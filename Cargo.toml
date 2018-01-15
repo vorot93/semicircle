@@ -24,6 +24,7 @@ radius-parser = { git = "https://github.com/rusticata/radius-parser" }
 bytes = "*"
 futures = "*"
 futures-await = "*"
+futures-cpupool = "*"
 enum_primitive = "*"
 nom = "*"
 tokio-io = "*"
