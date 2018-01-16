@@ -72,13 +72,33 @@ impl RadiusIO for UdpSocket {
 
 pub type RadiusHandlerResult = Box<Future<Item = Vec<RadiusMessage>, Error = io::Error> + Send>;
 
+pub enum SendErrorOutcome {
+    Drop,
+    Stop,
+}
+
+pub trait ErrorHandler {
+    fn on_handler_error(&self, m: &str);
+    fn on_send_error(&self, msg: RadiusMessage, e: Option<io::Error>) -> SendErrorOutcome;
+}
+
+struct DummyErrorHandler;
+impl ErrorHandler for DummyErrorHandler {
+    fn on_handler_error(&self, _: &str) {}
+    fn on_send_error(&self, _: RadiusMessage, _: Option<io::Error>) -> SendErrorOutcome {
+        SendErrorOutcome::Drop
+    }
+}
+
 pub struct ServerBuilder {
     cpu_pool: CpuPool,
+    error_handler: Arc<ErrorHandler + Send + Sync + 'static>,
     cancellation_token: Arc<CancellationToken>,
     handler: Box<Fn(RadiusMessage) -> RadiusHandlerResult + Send + Sync + 'static>,
 }
 
 struct HandleState {
+    pub error_handler: Arc<ErrorHandler + Send + Sync + 'static>,
     pub cancellation_token: Arc<CancellationToken>,
     pub output: Arc<Mutex<Sink<SinkItem = RadiusMessage, SinkError = io::Error> + Send>>,
 }
@@ -87,6 +107,7 @@ impl ServerBuilder {
     pub fn new() -> Self {
         Self {
             cpu_pool: CpuPool::new(1),
+            error_handler: Arc::new(DummyErrorHandler),
             cancellation_token: CancellationTokenSource::new().token().clone(),
             handler: Box::new(|_| RadiusHandlerResult::from(Box::new(ok(vec![])))),
         }
@@ -95,19 +116,23 @@ impl ServerBuilder {
     fn main_handler(
         cpu_pool: CpuPool,
         framed: tokio_core::net::UdpFramed<RadiusCodec>,
+        error_handler: Arc<ErrorHandler + Send + Sync + 'static>,
         handler: Box<Fn(RadiusMessage) -> RadiusHandlerResult + Send + Sync + 'static>,
         cancellation_token: Arc<CancellationToken>,
     ) -> impl Future<Item = (), Error = io::Error> {
         let (output, input) = framed.split();
 
-        let output_ref = Arc::new(Mutex::new(output));
+        let output_ref: Arc<
+            Mutex<Sink<SinkItem = RadiusMessage, SinkError = std::io::Error> + Send + 'static>,
+        > = Arc::new(Mutex::new(output));
 
         input
             .map(move |v| {
                 (
                     HandleState {
-                        cancellation_token: cancellation_token.clone(),
-                        output: output_ref.clone(),
+                        error_handler: Arc::clone(&error_handler),
+                        cancellation_token: Arc::clone(&cancellation_token),
+                        output: Arc::clone(&output_ref),
                     },
                     v,
                 )
@@ -124,7 +149,21 @@ impl ServerBuilder {
                             .map(move |replies| (state, replies)),
                     ).and_then(|(state, replies)| {
                             for reply in replies {
-                                state.output.lock().unwrap().start_send(reply)?;
+                                let send_result =
+                                    state.output.lock().unwrap().start_send(reply.clone());
+                                if let Err(e) = send_result {
+                                    match state.error_handler.on_send_error(reply, Some(e)) {
+                                        SendErrorOutcome::Drop => {
+                                            continue;
+                                        }
+                                        SendErrorOutcome::Stop => {
+                                            return Err(io::Error::new(
+                                                io::ErrorKind::Other,
+                                                "Stopping",
+                                            ));
+                                        }
+                                    }
+                                }
                             }
                             Ok(state)
                         })
@@ -138,6 +177,14 @@ impl ServerBuilder {
                 }
             })
             .for_each(|_| Ok(()))
+    }
+
+    pub fn with_error_handler<T>(mut self, error_handler: T) -> Self
+    where
+        T: ErrorHandler + Send + Sync + 'static,
+    {
+        self.error_handler = Arc::new(error_handler);
+        self
     }
 
     pub fn with_handler<F>(mut self, f: F) -> Self
@@ -182,6 +229,7 @@ impl<T: RadiusIO + 'static> Server<T> {
         ServerBuilder::main_handler(
             self.inner.cpu_pool,
             framed,
+            self.inner.error_handler,
             self.inner.handler,
             self.inner.cancellation_token,
         )
