@@ -20,7 +20,7 @@ path = "src/main.rs"
 byteorder = "*"
 cancellation = "*"
 error-chain = "*"
-radius-parser = { git = "https://github.com/vorot93/radius-parser" }
+radius-parser = { git = "https://github.com/rusticata/radius-parser" }
 bytes = "*"
 futures = "*"
 futures-await = "*"
