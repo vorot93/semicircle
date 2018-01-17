@@ -223,6 +223,16 @@ impl<T: RadiusIO + 'static> Server<T> {
         self.inner
     }
 
+    pub fn reconfigure<F>(self, f: F) -> Self
+    where
+        F: Fn(ServerBuilder) -> ServerBuilder,
+    {
+        Self {
+            inner: f(self.inner),
+            socket: self.socket,
+        }
+    }
+
     pub fn build(self) -> impl Future<Item = (), Error = io::Error> {
         let framed = self.socket.framed(RadiusCodec);
 
