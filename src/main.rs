@@ -1,4 +1,7 @@
-extern crate futures;
+#![feature(conservative_impl_trait)]
+#![feature(generators)]
+
+extern crate futures_await as futures;
 extern crate futures_cpupool;
 extern crate radius_parser as rp;
 extern crate semicircle;
@@ -14,39 +17,32 @@ use std::sync::Arc;
 use std::time::Duration;
 
 fn server_handler(
-    timer: &Timer,
+    timer: Arc<Timer>,
     pkt: semicircle::RadiusMessage,
 ) -> Box<Future<Item = Vec<semicircle::RadiusMessage>, Error = io::Error> + Send> {
-    println!("Received message from {}:\n{:?}", pkt.addr, pkt.data);
+    Box::new(async_block! {
+        println!("Received message from {}:\n{:?}", pkt.addr, pkt.data);
 
-    // We will just sleep here for now. All external I/O and decision making code is up to you.
-    Box::new(
-        timer
-            .sleep(Duration::from_millis(1000))
-            .map(move |_| pkt)
-            .map_err(|e| {
-                panic!(e);
-            })
-            .inspect(|_| {
-                println!("Slept and now forming response");
-            })
-            .and_then(|pkt| {
-                let response = vec![
-                    semicircle::RadiusMessage {
-                        addr: pkt.addr,
-                        data: semicircle::pkt::RadiusData {
-                            code: rp::RadiusCode::AccessAccept,
-                            identifier: pkt.data.identifier,
-                            authenticator: pkt.data.authenticator,
-                            attributes: vec![],
-                        },
-                    },
-                ];
+        // We will just sleep here for now. All external I/O and decision making code is up to you.
+        await!(timer.sleep(Duration::from_millis(1000))).unwrap();
 
-                // And here we just return packets that will be sent in return
-                Ok(response)
-            }),
-    )
+        println!("Slept and now forming response");
+
+        let response = vec![
+            semicircle::RadiusMessage {
+                addr: pkt.addr,
+                data: semicircle::pkt::RadiusData {
+                    code: rp::RadiusCode::AccessAccept,
+                    identifier: pkt.data.identifier,
+                    authenticator: pkt.data.authenticator,
+                    attributes: vec![],
+                },
+            },
+        ];
+
+        // And here we just return packets that will be sent in return
+        Ok(response)
+    })
 }
 
 fn main() {
@@ -55,10 +51,7 @@ fn main() {
         .expect("Failed to bind to a socket");
 
     let timer = Arc::new(Timer::default());
-    let handler = {
-        let timer = Arc::clone(&timer);
-        move |pkt| server_handler(&*timer, pkt)
-    };
+    let handler = move |pkt| server_handler(Arc::clone(&timer), pkt);
 
     let srv = semicircle::ServerBuilder::new()
         .with_cpu_pool(futures_cpupool::Builder::new().pool_size(8))
