@@ -10,6 +10,10 @@ error_chain! {
             description(""),
             display("{}", t),
         }
+        CancelledError(t: String) {
+            description("operation has been cancelled"),
+            display("operation has been cancelled: {}", t)
+        }
     }
 }
 
