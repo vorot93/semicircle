@@ -19,9 +19,9 @@ path = "src/main.rs"
 [dependencies]
 byteorder = "*"
 cancellation = "*"
-error-chain = "*"
 radius-parser = { git = "https://github.com/rusticata/radius-parser" }
 bytes = "*"
+failure = "*"
 futures = "*"
 futures-await = "*"
 futures-cpupool = "*"

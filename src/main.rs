@@ -1,6 +1,8 @@
 #![feature(conservative_impl_trait)]
 #![feature(generators)]
+#![feature(proc_macro)]
 
+extern crate failure;
 extern crate futures_await as futures;
 extern crate futures_cpupool;
 extern crate radius_parser as rp;
@@ -12,14 +14,11 @@ use futures::prelude::*;
 use tokio_core::net::UdpSocket;
 use tokio_core::reactor::Core;
 use tokio_timer::Timer;
-use std::io;
+use semicircle::{RadiusHandlerResult, RadiusMessage};
 use std::sync::Arc;
 use std::time::Duration;
 
-fn server_handler(
-    timer: Arc<Timer>,
-    pkt: semicircle::RadiusMessage,
-) -> Box<Future<Item = Vec<semicircle::RadiusMessage>, Error = io::Error> + Send> {
+fn server_handler(timer: Arc<Timer>, pkt: RadiusMessage) -> RadiusHandlerResult {
     Box::new(async_block! {
         println!("Received message from {}:\n{:?}", pkt.addr, pkt.data);
 
@@ -29,7 +28,7 @@ fn server_handler(
         println!("Slept and now forming response");
 
         let response = vec![
-            semicircle::RadiusMessage {
+            RadiusMessage {
                 addr: pkt.addr,
                 data: semicircle::pkt::RadiusData {
                     code: rp::RadiusCode::AccessAccept,

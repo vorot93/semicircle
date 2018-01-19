@@ -6,8 +6,8 @@
 extern crate bytes;
 extern crate cancellation;
 #[macro_use]
-extern crate error_chain;
-extern crate futures;
+extern crate failure;
+extern crate futures_await as futures;
 extern crate futures_cpupool;
 extern crate nom;
 extern crate radius_parser;
@@ -70,7 +70,8 @@ impl RadiusIO for UdpSocket {
     }
 }
 
-pub type RadiusHandlerResult = Box<Future<Item = Vec<RadiusMessage>, Error = io::Error> + Send>;
+pub type RadiusHandlerResult =
+    Box<Future<Item = Vec<RadiusMessage>, Error = failure::Error> + Send>;
 
 pub enum SendErrorOutcome {
     Drop,
@@ -119,7 +120,7 @@ impl ServerBuilder {
         error_handler: Arc<ErrorHandler + Send + Sync + 'static>,
         handler: Box<Fn(RadiusMessage) -> RadiusHandlerResult + Send + Sync + 'static>,
         cancellation_token: Arc<CancellationToken>,
-    ) -> impl Future<Item = (), Error = io::Error> {
+    ) -> impl Future<Item = (), Error = failure::Error> {
         let (output, input) = framed.split();
 
         let output_ref: Arc<
@@ -177,6 +178,7 @@ impl ServerBuilder {
                 }
             })
             .for_each(|_| Ok(()))
+            .map_err(|e| e.into())
     }
 
     pub fn with_error_handler<T>(mut self, error_handler: T) -> Self
@@ -233,7 +235,7 @@ impl<T: RadiusIO + 'static> Server<T> {
         }
     }
 
-    pub fn build(self) -> impl Future<Item = (), Error = io::Error> {
+    pub fn build(self) -> impl Future<Item = (), Error = failure::Error> {
         let framed = self.socket.framed(RadiusCodec);
 
         ServerBuilder::main_handler(

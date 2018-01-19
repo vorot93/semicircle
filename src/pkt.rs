@@ -1,4 +1,5 @@
 extern crate enum_primitive;
+extern crate failure;
 extern crate radius_parser as rp;
 extern crate std;
 
@@ -19,17 +20,17 @@ pub struct VendorSpecificDecoded {
 }
 
 impl<'data> TryFrom<&'data [u8]> for VendorSpecificDecoded {
-    type Error = errors::Error;
+    type Error = failure::Error;
     fn try_from(v: &'data [u8]) -> Result<VendorSpecificDecoded, Self::Error> {
         let real_len = v.len();
         if real_len < 3 || real_len > 255 {
-            Err(errors::ErrorKind::ParseError("VSA data has invalid size".into()).into())
+            bail!("VSA data has invalid size");
         } else {
             let vendor_type = v[0];
             let len = v[1];
 
             if real_len - 3 != len as usize {
-                Err(errors::ErrorKind::ParseError("Invalid length in byte 2".into()).into())
+                bail!("Invalid length in byte 2");
             } else {
                 let text = String::from_utf8(v.get(2..real_len - 1).unwrap().into())?;
                 Ok(VendorSpecificDecoded { vendor_type, text })
@@ -59,7 +60,7 @@ pub enum VendorSpecificData {
 }
 
 impl VendorSpecificData {
-    pub fn try_decode(&self) -> errors::Result<Self> {
+    pub fn try_decode(&self) -> Result<Self, failure::Error> {
         match *self {
             VendorSpecificData::Decoded(_) => Ok(self.clone()),
             VendorSpecificData::Encoded(ref data) => Ok(VendorSpecificData::Decoded(
@@ -152,7 +153,7 @@ impl<'data> TryFrom<rpAttr<'data>> for RadiusAttribute {
 }
 
 impl TryFrom<RadiusAttribute> for (u8, Vec<u8>) {
-    type Error = errors::Error;
+    type Error = failure::Error;
     fn try_from(v: RadiusAttribute) -> Result<Self, Self::Error> {
         Ok(match v {
             RadiusAttribute::UserName(val) => (1, val),
@@ -173,7 +174,7 @@ impl TryFrom<RadiusAttribute> for (u8, Vec<u8>) {
             RadiusAttribute::FilterId(text) => (11, text),
             RadiusAttribute::FramedMTU(mtu) => {
                 if mtu < 64 || mtu > 65535 {
-                    return Err(errors::ErrorKind::ParseError("MTU out of range".into()).into());
+                    bail!("MTU out of range");
                 } else {
                     (12, util::vec_from_u32(mtu))
                 }
@@ -193,7 +194,7 @@ impl TryFrom<RadiusAttribute> for (u8, Vec<u8>) {
 }
 
 impl TryFrom<RadiusAttribute> for Vec<u8> {
-    type Error = errors::Error;
+    type Error = failure::Error;
     fn try_from(v: RadiusAttribute) -> Result<Vec<u8>, Self::Error> {
         let mut out = Vec::new();
 
@@ -202,9 +203,7 @@ impl TryFrom<RadiusAttribute> for Vec<u8> {
         let len = payload.len() + 2;
 
         if len > 255 {
-            return Err(
-                errors::ErrorKind::ParseError("Attribute length cannot exceed 255".into()).into(),
-            );
+            bail!("Attribute length cannot exceed 255");
         }
 
         out.push(code);
@@ -224,10 +223,15 @@ pub struct RadiusData {
 }
 
 impl<'data> TryFrom<rpData<'data>> for RadiusData {
-    type Error = errors::Error;
+    type Error = failure::Error;
     fn try_from(v: rpData) -> Result<Self, Self::Error> {
+        let code = match self::rp::RadiusCode::from_u8(v.code) {
+            Some(v) => v,
+            None => { bail!("Failed to parse RADIUS code"); }
+        };
+
         Ok(Self {
-            code: self::rp::RadiusCode::from_u8(v.code)?,
+            code,
             identifier: v.identifier,
             authenticator: {
                 let mut a: [u8; 16] = Default::default();
