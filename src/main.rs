@@ -4,13 +4,14 @@
 
 extern crate failure;
 extern crate futures_await as futures;
-extern crate futures_cpupool;
+extern crate futures_pool;
 extern crate radius_parser as rp;
 extern crate semicircle;
 extern crate tokio_core;
 extern crate tokio_timer;
 
 use futures::prelude::*;
+use futures_pool::Pool;
 use tokio_core::net::UdpSocket;
 use tokio_core::reactor::Core;
 use tokio_timer::Timer;
@@ -53,7 +54,7 @@ fn main() {
     let handler = move |pkt| server_handler(Arc::clone(&timer), pkt);
 
     let srv = semicircle::ServerBuilder::new()
-        .with_cpu_pool(futures_cpupool::Builder::new().pool_size(8))
+        .with_cpu_pool(Pool::builder().pool_size(8))
         .with_handler(handler)
         .acquire_socket(socket)
         .build();

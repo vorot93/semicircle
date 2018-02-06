@@ -227,7 +227,9 @@ impl<'data> TryFrom<rpData<'data>> for RadiusData {
     fn try_from(v: rpData) -> Result<Self, Self::Error> {
         let code = match self::rp::RadiusCode::from_u8(v.code) {
             Some(v) => v,
-            None => { bail!("Failed to parse RADIUS code"); }
+            None => {
+                bail!("Failed to parse RADIUS code");
+            }
         };
 
         Ok(Self {

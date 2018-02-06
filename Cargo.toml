@@ -24,7 +24,7 @@ bytes = "*"
 failure = "*"
 futures = "*"
 futures-await = "*"
-futures-cpupool = "*"
+futures-pool = { git = "https://github.com/carllerche/futures-pool" }
 enum_primitive = "*"
 nom = "*"
 tokio-io = "*"

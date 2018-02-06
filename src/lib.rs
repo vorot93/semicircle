@@ -2,13 +2,15 @@
 #![feature(try_trait)]
 #![feature(trait_alias)]
 #![feature(conservative_impl_trait)]
+#![feature(generators)]
+#![feature(proc_macro)]
 
 extern crate bytes;
 extern crate cancellation;
 #[macro_use]
 extern crate failure;
 extern crate futures_await as futures;
-extern crate futures_cpupool;
+extern crate futures_pool;
 extern crate nom;
 extern crate radius_parser;
 extern crate tokio_core;
@@ -28,7 +30,7 @@ use cancellation::{CancellationToken, CancellationTokenSource};
 use tokio_core::net::{UdpCodec, UdpFramed, UdpSocket};
 use futures::prelude::*;
 use futures::future::ok;
-use futures_cpupool::CpuPool;
+use futures_pool::{Builder as PoolBuilder, Pool, Sender as PoolSender};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct RadiusMessage {
@@ -92,93 +94,68 @@ impl ErrorHandler for DummyErrorHandler {
 }
 
 pub struct ServerBuilder {
-    cpu_pool: CpuPool,
+    cpu_pool: (PoolSender, Pool),
     error_handler: Arc<ErrorHandler + Send + Sync + 'static>,
     cancellation_token: Arc<CancellationToken>,
     handler: Box<Fn(RadiusMessage) -> RadiusHandlerResult + Send + Sync + 'static>,
 }
 
-struct HandleState {
-    pub error_handler: Arc<ErrorHandler + Send + Sync + 'static>,
-    pub cancellation_token: Arc<CancellationToken>,
-    pub output: Arc<Mutex<Sink<SinkItem = RadiusMessage, SinkError = io::Error> + Send>>,
-}
-
 impl ServerBuilder {
     pub fn new() -> Self {
         Self {
-            cpu_pool: CpuPool::new(1),
+            cpu_pool: Pool::new(),
             error_handler: Arc::new(DummyErrorHandler),
             cancellation_token: CancellationTokenSource::new().token().clone(),
             handler: Box::new(|_| RadiusHandlerResult::from(Box::new(ok(vec![])))),
         }
     }
 
+    #[async]
     fn main_handler(
-        cpu_pool: CpuPool,
+        cpu_pool: (PoolSender, Pool),
         framed: tokio_core::net::UdpFramed<RadiusCodec>,
         error_handler: Arc<ErrorHandler + Send + Sync + 'static>,
         handler: Box<Fn(RadiusMessage) -> RadiusHandlerResult + Send + Sync + 'static>,
         cancellation_token: Arc<CancellationToken>,
-    ) -> impl Future<Item = (), Error = failure::Error> {
+    ) -> Result<(), failure::Error> {
         let (output, input) = framed.split();
 
         let output_ref: Arc<
             Mutex<Sink<SinkItem = RadiusMessage, SinkError = std::io::Error> + Send + 'static>,
         > = Arc::new(Mutex::new(output));
 
-        input
-            .map(move |v| {
-                (
-                    HandleState {
-                        error_handler: Arc::clone(&error_handler),
-                        cancellation_token: Arc::clone(&cancellation_token),
-                        output: Arc::clone(&output_ref),
-                    },
-                    v,
-                )
-            })
-            .and_then({
-                let pool = cpu_pool.clone();
-                move |(state, pkt)| {
-                    pool.spawn(
-                        handler(pkt)
-                            .or_else(|e| {
-                                println!("{}", e);
-                                Ok(vec![])
-                            })
-                            .map(move |replies| (state, replies)),
-                    ).and_then(|(state, replies)| {
-                            for reply in replies {
-                                let send_result =
-                                    state.output.lock().unwrap().start_send(reply.clone());
-                                if let Err(e) = send_result {
-                                    match state.error_handler.on_send_error(reply, Some(e)) {
-                                        SendErrorOutcome::Drop => {
-                                            continue;
-                                        }
-                                        SendErrorOutcome::Stop => {
-                                            return Err(io::Error::new(
-                                                io::ErrorKind::Other,
-                                                "Stopping",
-                                            ));
-                                        }
-                                    }
-                                }
-                            }
-                            Ok(state)
-                        })
-                        .and_then(|state| {
-                            state
-                                .cancellation_token
-                                .result()
-                                .map(move |_| state)
-                                .map_err(|_| io::Error::new(io::ErrorKind::Other, "Time to stop"))
-                        })
+        let (sender, _pool) = cpu_pool;
+
+        #[async]
+        for request in input {
+            let replies = match await!(futures::sync::oneshot::spawn(handler(request), &sender)) {
+                Ok(v) => v,
+                Err(e) => {
+                    println!("{}", e);
+                    vec![]
                 }
-            })
-            .for_each(|_| Ok(()))
-            .map_err(|e| e.into())
+            };
+
+            for reply in replies {
+                let send_result = output_ref.lock().unwrap().start_send(reply.clone());
+                if let Err(e) = send_result {
+                    match error_handler.on_send_error(reply, Some(e)) {
+                        SendErrorOutcome::Drop => {
+                            continue;
+                        }
+                        SendErrorOutcome::Stop => {
+                            bail!("Stopped");
+                        }
+                    }
+                }
+            }
+
+            if let Err(_) = cancellation_token.result() {
+                bail!("Time to stop");
+            }
+        }
+
+        Ok(())
     }
 
     pub fn with_error_handler<T>(mut self, error_handler: T) -> Self
@@ -197,8 +174,8 @@ impl ServerBuilder {
         self
     }
 
-    pub fn with_cpu_pool(mut self, builder: &mut futures_cpupool::Builder) -> Self {
-        self.cpu_pool = builder.create();
+    pub fn with_cpu_pool(mut self, builder: &mut PoolBuilder) -> Self {
+        self.cpu_pool = builder.build();
         self
     }
 
