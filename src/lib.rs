@@ -1,36 +1,14 @@
-#![feature(try_from)]
-#![feature(try_trait)]
-#![feature(trait_alias)]
-#![feature(conservative_impl_trait)]
-#![feature(generators)]
-#![feature(proc_macro)]
-
-extern crate bytes;
-extern crate cancellation;
-#[macro_use]
-extern crate failure;
-extern crate futures_await as futures;
-extern crate futures_pool;
-extern crate nom;
-extern crate radius_parser;
-extern crate tokio_core;
-extern crate tokio_io;
-extern crate tokio_proto;
-extern crate tokio_service;
-
 pub mod errors;
 pub mod pkt;
 pub mod util;
 
-use std::sync::{Arc, Mutex};
-use std::io;
-use std::net::SocketAddr;
-use std::convert::TryFrom;
-use cancellation::{CancellationToken, CancellationTokenSource};
-use tokio_core::net::{UdpCodec, UdpFramed, UdpSocket};
-use futures::prelude::*;
-use futures::future::ok;
-use futures_pool::{Builder as PoolBuilder, Pool, Sender as PoolSender};
+use {
+    async_trait::async_trait,
+    futures::{sink::SinkExt, stream::FuturesUnordered},
+    std::{convert::TryFrom, future::Future, io, sync::Arc},
+    tokio::{net::UdpSocket, stream::*},
+    tokio_util::{codec::*, udp::*},
+};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct RadiusMessage {
@@ -38,49 +16,36 @@ pub struct RadiusMessage {
     pub data: pkt::RadiusData,
 }
 
-pub struct RadiusCodec;
-
-impl UdpCodec for RadiusCodec {
-    type In = RadiusMessage;
-    type Out = RadiusMessage;
-
-    fn decode(&mut self, addr: &SocketAddr, buf: &[u8]) -> io::Result<Self::In> {
-        match radius_parser::parse_radius_data(buf) {
-            nom::IResult::Done(_, unowned_pkt) => Ok(RadiusMessage {
-                addr: *addr,
-                data: TryFrom::try_from(unowned_pkt).map_err(|_| {
-                    io::Error::new(io::ErrorKind::InvalidData, "Failed to parse packet")
-                })?,
-            }),
-            _ => Err(io::Error::new(io::ErrorKind::InvalidData, "")),
-        }
-    }
-
-    fn encode(&mut self, v: Self::Out, into: &mut Vec<u8>) -> SocketAddr {
-        into.append(&mut v.data.into());
-        v.addr
-    }
+#[async_trait]
+pub trait RadiusHandler: Send + Sync + 'static {
+    async fn handle(
+        &self,
+        pkt: RadiusMessage,
+    ) -> Result<Vec<RadiusMessage>, Box<dyn std::error::Error + Send + Sync>>;
 }
 
-pub trait RadiusIO {
-    fn framed(self, codec: RadiusCodec) -> UdpFramed<RadiusCodec>;
-}
-
-impl RadiusIO for UdpSocket {
-    fn framed(self, codec: RadiusCodec) -> UdpFramed<RadiusCodec> {
-        self.framed(codec)
+#[async_trait]
+impl<F, Fut> RadiusHandler for F
+where
+    F: Fn(RadiusMessage) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Result<Vec<RadiusMessage>, Box<dyn std::error::Error + Send + Sync>>>
+        + Send
+        + 'static,
+{
+    async fn handle(
+        &self,
+        pkt: RadiusMessage,
+    ) -> Result<Vec<RadiusMessage>, Box<dyn std::error::Error + Send + Sync>> {
+        (self)(pkt).await
     }
 }
-
-pub type RadiusHandlerResult =
-    Box<Future<Item = Vec<RadiusMessage>, Error = failure::Error> + Send>;
 
 pub enum SendErrorOutcome {
     Drop,
     Stop,
 }
 
-pub trait ErrorHandler {
+pub trait ErrorHandler: Send + Sync {
     fn on_handler_error(&self, m: &str);
     fn on_send_error(&self, msg: RadiusMessage, e: Option<io::Error>) -> SendErrorOutcome;
 }
@@ -94,133 +59,70 @@ impl ErrorHandler for DummyErrorHandler {
 }
 
 pub struct ServerBuilder {
-    cpu_pool: (PoolSender, Pool),
-    error_handler: Arc<ErrorHandler + Send + Sync + 'static>,
-    cancellation_token: Arc<CancellationToken>,
-    handler: Box<Fn(RadiusMessage) -> RadiusHandlerResult + Send + Sync + 'static>,
+    handler: Arc<dyn RadiusHandler>,
+}
+
+impl Default for ServerBuilder {
+    fn default() -> Self {
+        Self {
+            handler: Arc::new(|_| async { Ok(vec![]) }),
+        }
+    }
 }
 
 impl ServerBuilder {
     pub fn new() -> Self {
-        Self {
-            cpu_pool: Pool::new(),
-            error_handler: Arc::new(DummyErrorHandler),
-            cancellation_token: CancellationTokenSource::new().token().clone(),
-            handler: Box::new(|_| RadiusHandlerResult::from(Box::new(ok(vec![])))),
-        }
-    }
-
-    #[async]
-    fn main_handler(
-        cpu_pool: (PoolSender, Pool),
-        framed: tokio_core::net::UdpFramed<RadiusCodec>,
-        error_handler: Arc<ErrorHandler + Send + Sync + 'static>,
-        handler: Box<Fn(RadiusMessage) -> RadiusHandlerResult + Send + Sync + 'static>,
-        cancellation_token: Arc<CancellationToken>,
-    ) -> Result<(), failure::Error> {
-        let (output, input) = framed.split();
-
-        let output_ref: Arc<
-            Mutex<Sink<SinkItem = RadiusMessage, SinkError = std::io::Error> + Send + 'static>,
-        > = Arc::new(Mutex::new(output));
-
-        let (sender, _pool) = cpu_pool;
-
-        #[async]
-        for request in input {
-            let replies = match await!(futures::sync::oneshot::spawn(handler(request), &sender)) {
-                Ok(v) => v,
-                Err(e) => {
-                    println!("{}", e);
-                    vec![]
-                }
-            };
-
-            for reply in replies {
-                let send_result = output_ref.lock().unwrap().start_send(reply.clone());
-                if let Err(e) = send_result {
-                    match error_handler.on_send_error(reply, Some(e)) {
-                        SendErrorOutcome::Drop => {
-                            continue;
-                        }
-                        SendErrorOutcome::Stop => {
-                            bail!("Stopped");
-                        }
-                    }
-                }
-            }
-
-            if let Err(_) = cancellation_token.result() {
-                bail!("Time to stop");
-            }
-        }
-
-        Ok(())
-    }
-
-    pub fn with_error_handler<T>(mut self, error_handler: T) -> Self
-    where
-        T: ErrorHandler + Send + Sync + 'static,
-    {
-        self.error_handler = Arc::new(error_handler);
-        self
+        Self::default()
     }
 
     pub fn with_handler<F>(mut self, f: F) -> Self
     where
-        F: Fn(RadiusMessage) -> RadiusHandlerResult + Send + Sync + 'static,
+        F: RadiusHandler,
     {
-        self.handler = Box::new(f);
+        self.handler = Arc::new(f);
         self
     }
 
-    pub fn with_cpu_pool(mut self, builder: &mut PoolBuilder) -> Self {
-        self.cpu_pool = builder.build();
-        self
-    }
+    pub async fn build(self, socket: UdpSocket) {
+        let Self { handler } = self;
 
-    pub fn with_cancellation(mut self, token: Arc<CancellationToken>) -> Self {
-        self.cancellation_token = token;
-        self
-    }
+        let (mut output, mut input) =
+            futures::stream::StreamExt::split(UdpFramed::new(socket, BytesCodec::new()));
 
-    pub fn acquire_socket<T: RadiusIO>(self, socket: T) -> Server<T> {
-        Server {
-            inner: self,
-            socket,
-        }
-    }
-}
+        let (sender_tx, mut sender_rx) = tokio::sync::mpsc::channel(1000);
 
-pub struct Server<T: RadiusIO> {
-    inner: ServerBuilder,
-    socket: T,
-}
+        let tasks = FuturesUnordered::new();
 
-impl<T: RadiusIO + 'static> Server<T> {
-    pub fn release_socket(self) -> ServerBuilder {
-        self.inner
-    }
+        tasks.push(tokio::spawn(async move {
+            while let Some((p, addr)) = input.next().await.transpose().unwrap() {
+                let _ = || -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+                    let data = pkt::RadiusData::try_from(
+                        radius_parser::parse_radius_data(p.as_ref())
+                            .map_err(|e| format!("{:?}", e))?
+                            .1,
+                    )?;
 
-    pub fn reconfigure<F>(self, f: F) -> Self
-    where
-        F: Fn(ServerBuilder) -> ServerBuilder,
-    {
-        Self {
-            inner: f(self.inner),
-            socket: self.socket,
-        }
-    }
+                    tokio::spawn({
+                        let handler = handler.clone();
+                        let mut sender_tx = sender_tx.clone();
+                        async move {
+                            for pkt in handler.handle(RadiusMessage { data, addr }).await.unwrap() {
+                                sender_tx.send(pkt).await.unwrap();
+                            }
+                        }
+                    });
 
-    pub fn build(self) -> impl Future<Item = (), Error = failure::Error> {
-        let framed = self.socket.framed(RadiusCodec);
+                    Ok(())
+                }();
+            }
+        }));
 
-        ServerBuilder::main_handler(
-            self.inner.cpu_pool,
-            framed,
-            self.inner.error_handler,
-            self.inner.handler,
-            self.inner.cancellation_token,
-        )
+        tasks.push(tokio::spawn(async move {
+            while let Some(RadiusMessage { data, addr }) = sender_rx.next().await {
+                output.send((Vec::from(data).into(), addr)).await.unwrap();
+            }
+        }));
+
+        futures::stream::StreamExt::collect::<Vec<_>>(tasks).await;
     }
 }

@@ -1,34 +1,22 @@
 [package]
 name = "semicircle"
 version = "0.1.0"
+edition = "2018"
 authors = [
     "Artem Vorotnikov <artem@vorotnikov.me>"
 ]
 description = "Framework for creating custom RADIUS servers"
 repository = "https://github.com/vorot93/semicircle"
-license = "MIT/Apache"
-
-[lib]
-name = "semicircle"
-path = "src/lib.rs"
-
-[[bin]]
-name = "semicircle-sample-server"
-path = "src/main.rs"
+license = "MIT"
 
 [dependencies]
+async-trait = "*"
 byteorder = "*"
-cancellation = "*"
-radius-parser = { git = "https://github.com/rusticata/radius-parser" }
 bytes = "*"
+radius-parser = { git = "https://github.com/rusticata/radius-parser" }
 failure = "*"
-futures = "*"
-futures-await = "*"
-futures-pool = { git = "https://github.com/carllerche/futures-pool" }
+futures = "0.3"
 enum_primitive = "*"
 nom = "*"
-tokio-io = "*"
-tokio-core = "*"
-tokio-proto = "*"
-tokio-service = "*"
-tokio-timer = "*"
+tokio = { version = "0.2", features = ["full"] }
+tokio-util = { version = "0.2", features = ["full"] }
