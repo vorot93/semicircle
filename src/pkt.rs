@@ -3,15 +3,12 @@ extern crate failure;
 extern crate radius_parser as rp;
 extern crate std;
 
-use errors;
-use util;
-
-use self::std::net::Ipv4Addr;
+use self::enum_primitive::FromPrimitive;
 use self::rp::RadiusAttribute as rpAttr;
 use self::rp::RadiusData as rpData;
 use self::std::convert::TryFrom;
 use self::std::convert::TryInto;
-use self::enum_primitive::FromPrimitive;
+use self::std::net::Ipv4Addr;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct VendorSpecificDecoded {
@@ -20,17 +17,17 @@ pub struct VendorSpecificDecoded {
 }
 
 impl<'data> TryFrom<&'data [u8]> for VendorSpecificDecoded {
-    type Error = failure::Error;
+    type Error = Box<dyn std::error::Error + Send + Sync>;
     fn try_from(v: &'data [u8]) -> Result<VendorSpecificDecoded, Self::Error> {
         let real_len = v.len();
         if real_len < 3 || real_len > 255 {
-            bail!("VSA data has invalid size");
+            Err("VSA data has invalid size".into())
         } else {
             let vendor_type = v[0];
             let len = v[1];
 
             if real_len - 3 != len as usize {
-                bail!("Invalid length in byte 2");
+                Err("Invalid length in byte 2".into())
             } else {
                 let text = String::from_utf8(v.get(2..real_len - 1).unwrap().into())?;
                 Ok(VendorSpecificDecoded { vendor_type, text })
@@ -119,7 +116,7 @@ pub enum RadiusAttribute {
 }
 
 impl<'data> TryFrom<rpAttr<'data>> for RadiusAttribute {
-    type Error = errors::Error;
+    type Error = Box<dyn std::error::Error + Send + Sync>;
     fn try_from(v: rpAttr) -> Result<Self, Self::Error> {
         Ok(match v {
             rpAttr::UserName(name) => RadiusAttribute::UserName(name.into()),
@@ -164,22 +161,22 @@ impl TryFrom<RadiusAttribute> for (u8, Vec<u8>) {
                 out.extend_from_slice(&password);
                 (3, out)
             }
-            RadiusAttribute::NasIPAddress(addr) => (4, util::vec_from_ipv4(addr)),
-            RadiusAttribute::NasPort(port) => (5, util::vec_from_u32(port)),
-            RadiusAttribute::ServiceType(id) => (6, util::vec_from_u32(id as u32)),
-            RadiusAttribute::FramedProtocol(id) => (7, util::vec_from_u32(id as u32)),
-            RadiusAttribute::FramedIPAddress(ip) => (8, util::vec_from_ipv4(ip)),
-            RadiusAttribute::FramedIPNetmask(ip) => (9, util::vec_from_ipv4(ip)),
-            RadiusAttribute::FramedRouting(id) => (10, util::vec_from_u32(id as u32)),
+            RadiusAttribute::NasIPAddress(addr) => (4, crate::util::vec_from_ipv4(addr)),
+            RadiusAttribute::NasPort(port) => (5, crate::util::vec_from_u32(port)),
+            RadiusAttribute::ServiceType(id) => (6, crate::util::vec_from_u32(id as u32)),
+            RadiusAttribute::FramedProtocol(id) => (7, crate::util::vec_from_u32(id as u32)),
+            RadiusAttribute::FramedIPAddress(ip) => (8, crate::util::vec_from_ipv4(ip)),
+            RadiusAttribute::FramedIPNetmask(ip) => (9, crate::util::vec_from_ipv4(ip)),
+            RadiusAttribute::FramedRouting(id) => (10, crate::util::vec_from_u32(id as u32)),
             RadiusAttribute::FilterId(text) => (11, text),
             RadiusAttribute::FramedMTU(mtu) => {
                 if mtu < 64 || mtu > 65535 {
-                    bail!("MTU out of range");
+                    return Err("MTU out of range".into());
                 } else {
-                    (12, util::vec_from_u32(mtu))
+                    (12, crate::util::vec_from_u32(mtu))
                 }
             }
-            RadiusAttribute::FramedCompression(id) => (12, util::vec_from_u32(id as u32)),
+            RadiusAttribute::FramedCompression(id) => (12, crate::util::vec_from_u32(id as u32)),
             RadiusAttribute::VendorSpecific(vendor_id, data) => {
                 let mut out = vec![];
                 out.push(vendor_id as u8);
@@ -203,7 +200,7 @@ impl TryFrom<RadiusAttribute> for Vec<u8> {
         let len = payload.len() + 2;
 
         if len > 255 {
-            bail!("Attribute length cannot exceed 255");
+            return Err("Attribute length cannot exceed 255".into());
         }
 
         out.push(code);
@@ -228,7 +225,7 @@ impl<'data> TryFrom<rpData<'data>> for RadiusData {
         let code = match self::rp::RadiusCode::from_u8(v.code) {
             Some(v) => v,
             None => {
-                bail!("Failed to parse RADIUS code");
+                return Err("Failed to parse RADIUS code".into());
             }
         };
 
