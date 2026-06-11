@@ -2,13 +2,11 @@ pub mod errors;
 pub mod pkt;
 pub mod util;
 
-use {
-    async_trait::async_trait,
-    futures::{sink::SinkExt, stream::FuturesUnordered},
-    std::{convert::TryFrom, future::Future, io, sync::Arc},
-    tokio::{net::UdpSocket, stream::*},
-    tokio_util::{codec::*, udp::*},
-};
+use async_trait::async_trait;
+use futures::{sink::SinkExt, stream::FuturesUnordered};
+use std::{convert::TryFrom, future::Future, io, sync::Arc};
+use tokio::{net::UdpSocket, stream::*};
+use tokio_util::{codec::*, udp::*};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct RadiusMessage {
@@ -48,14 +46,6 @@ pub enum SendErrorOutcome {
 pub trait ErrorHandler: Send + Sync {
     fn on_handler_error(&self, m: &str);
     fn on_send_error(&self, msg: RadiusMessage, e: Option<io::Error>) -> SendErrorOutcome;
-}
-
-struct DummyErrorHandler;
-impl ErrorHandler for DummyErrorHandler {
-    fn on_handler_error(&self, _: &str) {}
-    fn on_send_error(&self, _: RadiusMessage, _: Option<io::Error>) -> SendErrorOutcome {
-        SendErrorOutcome::Drop
-    }
 }
 
 pub struct ServerBuilder {

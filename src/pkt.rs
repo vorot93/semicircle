@@ -1,8 +1,8 @@
-use radius_parser::RadiusAttribute as rpAttr;
-use radius_parser::RadiusData as rpData;
-use std::convert::TryFrom;
-use std::convert::TryInto;
-use std::net::Ipv4Addr;
+use radius_parser::{RadiusAttribute as rpAttr, RadiusData as rpData};
+use std::{
+    convert::{TryFrom, TryInto},
+    net::Ipv4Addr,
+};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct VendorSpecificDecoded {
@@ -14,7 +14,7 @@ impl<'data> TryFrom<&'data [u8]> for VendorSpecificDecoded {
     type Error = Box<dyn std::error::Error + Send + Sync>;
     fn try_from(v: &'data [u8]) -> Result<VendorSpecificDecoded, Self::Error> {
         let real_len = v.len();
-        if real_len < 3 || real_len > 255 {
+        if !(3..=255).contains(&real_len) {
             Err("VSA data has invalid size".into())
         } else {
             let vendor_type = v[0];
@@ -164,7 +164,7 @@ impl TryFrom<RadiusAttribute> for (u8, Vec<u8>) {
             RadiusAttribute::FramedRouting(id) => (10, crate::util::vec_from_u32(id.0)),
             RadiusAttribute::FilterId(text) => (11, text),
             RadiusAttribute::FramedMTU(mtu) => {
-                if mtu < 64 || mtu > 65535 {
+                if !(64..=65535).contains(&mtu) {
                     return Err("MTU out of range".to_string().into());
                 } else {
                     (12, crate::util::vec_from_u32(mtu))
@@ -228,7 +228,7 @@ impl<'data> TryFrom<rpData<'data>> for RadiusData {
             },
             attributes: {
                 let mut a = Vec::new();
-                for attr in v.attributes.unwrap_or_else(Vec::new) {
+                for attr in v.attributes.unwrap_or_default() {
                     a.push(RadiusAttribute::try_from(attr)?);
                 }
                 a

@@ -1,8 +1,7 @@
 extern crate byteorder;
 extern crate std;
 
-use self::byteorder::ByteOrder;
-use self::std::net::Ipv4Addr;
+use self::{byteorder::ByteOrder, std::net::Ipv4Addr};
 
 pub fn vec_from_u32(v: u32) -> Vec<u8> {
     let mut buf = [0; 4];
