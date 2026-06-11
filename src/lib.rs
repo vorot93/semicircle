@@ -3,10 +3,13 @@ pub mod pkt;
 pub mod util;
 
 use async_trait::async_trait;
-use futures::{sink::SinkExt, stream::FuturesUnordered};
+use futures::{
+    sink::SinkExt,
+    stream::{FuturesUnordered, StreamExt},
+};
 use std::{convert::TryFrom, future::Future, io, sync::Arc};
-use tokio::{net::UdpSocket, stream::*};
-use tokio_util::{codec::*, udp::*};
+use tokio::net::UdpSocket;
+use tokio_util::{bytes::Bytes, codec::*, udp::*};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct RadiusMessage {
@@ -76,8 +79,11 @@ impl ServerBuilder {
     pub async fn build(self, socket: UdpSocket) {
         let Self { handler } = self;
 
-        let (mut output, mut input) =
-            futures::stream::StreamExt::split(UdpFramed::new(socket, BytesCodec::new()));
+        // tokio-util 0.7's BytesCodec implements Encoder for both Bytes and
+        // BytesMut, so the Sink item type must be named explicitly here.
+        let (mut output, mut input) = StreamExt::split::<(Bytes, std::net::SocketAddr)>(
+            UdpFramed::new(socket, BytesCodec::new()),
+        );
 
         let (sender_tx, mut sender_rx) = tokio::sync::mpsc::channel(1000);
 
@@ -94,7 +100,7 @@ impl ServerBuilder {
 
                     tokio::spawn({
                         let handler = handler.clone();
-                        let mut sender_tx = sender_tx.clone();
+                        let sender_tx = sender_tx.clone();
                         async move {
                             for pkt in handler.handle(RadiusMessage { data, addr }).await.unwrap() {
                                 sender_tx.send(pkt).await.unwrap();
@@ -108,7 +114,7 @@ impl ServerBuilder {
         }));
 
         tasks.push(tokio::spawn(async move {
-            while let Some(RadiusMessage { data, addr }) = sender_rx.next().await {
+            while let Some(RadiusMessage { data, addr }) = sender_rx.recv().await {
                 output.send((Vec::from(data).into(), addr)).await.unwrap();
             }
         }));

@@ -8,7 +8,7 @@ async fn server_handler(
     println!("Received message from {}:\n{:?}", pkt.addr, pkt.data);
 
     // We will just sleep here for now. All external I/O and decision making code is up to you.
-    tokio::time::delay_for(Duration::from_millis(1000)).await;
+    tokio::time::sleep(Duration::from_millis(1000)).await;
 
     println!("Slept and now forming response");
 

@@ -10,8 +10,8 @@ repository = "https://github.com/vorot93/semicircle"
 license = "MIT"
 
 [dependencies]
-async-trait = "*"
+async-trait = "0.1"
 radius-parser = "0.5"
 futures = "0.3"
-tokio = { version = "0.2", features = ["full"] }
-tokio-util = { version = "0.2", features = ["full"] }
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["codec", "net"] }
