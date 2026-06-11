@@ -1,7 +1,5 @@
 # Semicircle
 
-[![GitHub Actions workflow status](https://github.com/vorot93/semicircle/workflows/Continuous%20integration/badge.svg)](https://github.com/vorot93/semicircle/actions)
-
 [![](semicircle-logo.svg)]()
 
 So, you work at an ISP and you need a RADIUS server for your billing. If you want
