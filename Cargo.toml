@@ -11,7 +11,6 @@ license = "MIT"
 
 [dependencies]
 async-trait = "*"
-byteorder = "*"
 radius-parser = { git = "https://github.com/rusticata/radius-parser" }
 futures = "0.3"
 tokio = { version = "0.2", features = ["full"] }

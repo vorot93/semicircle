@@ -1,16 +1,7 @@
-extern crate byteorder;
-extern crate std;
-
-use self::{byteorder::ByteOrder, std::net::Ipv4Addr};
+use std::net::Ipv4Addr;
 
 pub fn vec_from_u32(v: u32) -> Vec<u8> {
-    let mut buf = [0; 4];
-    byteorder::BigEndian::write_u32(&mut buf, v);
-
-    let mut out = Vec::new();
-    out.extend_from_slice(&buf);
-
-    out
+    v.to_be_bytes().to_vec()
 }
 
 pub fn vec_from_ipv4(v: Ipv4Addr) -> Vec<u8> {
